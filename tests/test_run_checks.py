@@ -6,7 +6,7 @@ import helpers
 from app.engine.checks import CHECKS, findings_from, run_checks
 
 KEY_TO_OUTCOME = {"pass": "pass", "FINDING": "finding", "skip": "skipped_not_present"}
-IMPLEMENTED = ["C1", "C2", "C3", "C4", "C5", "C6"]
+IMPLEMENTED = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"]
 
 
 class TestAgainstTheAnswerKey(unittest.TestCase):
@@ -44,6 +44,17 @@ class TestAgainstTheAnswerKey(unittest.TestCase):
     def test_set_7_gives_two_c1_findings_and_set_8_gives_one_c6_finding(self):
         self.assertEqual([f.check_id for f in findings_from(run_checks(helpers.load_documents(7), self.rules))], ["C1", "C1"])
         self.assertEqual([f.check_id for f in findings_from(run_checks(helpers.load_documents(8), self.rules))], ["C6"])
+
+
+    def test_all_ten_checks_catch_every_planted_error_with_no_false_alarms(self):
+        planted = {4: "C4", 5: "C3", 6: "C5", 7: "C1", 8: "C6", 9: "C7", 10: "C8"}
+        for n in range(1, 11):
+            found = {f.check_id for f in findings_from(run_checks(helpers.load_documents(n), self.rules))}
+            self.assertEqual(found, {planted[n]} if n in planted else set(), f"set {n}")
+
+    def test_set_9_gives_the_swapped_container_finding_and_the_check_digit_finding(self):
+        found = findings_from(run_checks(helpers.load_documents(9), self.rules))
+        self.assertEqual([(f.check_id, f.severity) for f in found], [("C7", "high"), ("C7", "medium")])
 
 
 if __name__ == "__main__":
