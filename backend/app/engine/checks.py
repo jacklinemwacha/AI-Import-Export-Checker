@@ -295,8 +295,166 @@ def check_c6(documents, rules):
     return CheckResult("C6", "pass")
 
 
+# ---------- C7: container number (packing list against bill of lading) ----------
+CONTAINER_FORMAT = re.compile(r"^[A-Z]{4}\d{7}$")      # four letters, seven digits
+
+
+def _tidy_container(value):
+    return re.sub(r"[\s.\-]", "", str(value)).upper() if value is not None else ""
+
+
+def _container_check_digit_ok(code):
+    """ISO 6346: the last digit is calculated from the first ten characters."""
+    values, v = {}, 10
+    for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if v % 11 == 0:
+            v += 1
+        values[ch] = v
+        v += 1
+    total = sum((values[c] if c.isalpha() else int(c)) * (2 ** i) for i, c in enumerate(code[:10]))
+    return total % 11 % 10 == int(code[10])
+
+
+def check_c7(documents, rules):
+    """The packing list container must be one of the bill of lading containers (the bill may list several).
+    Spaces, hyphens and case are ignored. Each number must be in a valid format (four letters, seven digits).
+    If the rule pack setting container_check_digit is true, the check digit is verified too (Medium)."""
+    pl = documents.get("packing_list") or {}
+    bl = documents.get("bill_of_lading") or {}
+    raw_a = pl.get("container_number")
+    a = _tidy_container(raw_a)
+    bs = [(str(raw).strip(), _tidy_container(raw)) for raw in (bl.get("container_numbers") or []) if _tidy_container(raw)]
+    if not a or not bs:
+        return CheckResult("C7", "skipped_not_present", note="The container number is not present on both documents.")
+
+    entries = [("packing_list", str(raw_a).strip(), a)] + [("bill_of_lading", raw, t) for raw, t in bs]
+    findings = [Finding("C7", "high", [doc], "container_number", {doc: raw}, f"Container number {raw} is not in a valid format.")
+                for doc, raw, tidy in entries if not CONTAINER_FORMAT.match(tidy)]
+    if findings:
+        return CheckResult("C7", "finding", findings=findings)
+
+    docs = ["packing_list", "bill_of_lading"]
+    if a not in {t for _, t in bs}:
+        printed = ", ".join(raw for raw, _ in bs)
+        findings.append(Finding("C7", "high", docs, "container_number", {docs[0]: str(raw_a).strip(), docs[1]: printed},
+                                f"Container number differs: {str(raw_a).strip()} on the packing list, {printed} on the bill of lading."))
+    if rules.get("container_check_digit"):
+        for doc, raw, tidy in entries:
+            if not _container_check_digit_ok(tidy):
+                findings.append(Finding("C7", "medium", [doc], "container_number", {doc: raw},
+                                        f"Container number {raw} on the {DOC_LABEL[doc]} has an invalid check digit. Please check it."))
+    return CheckResult("C7", "finding" if findings else "pass", findings=findings)
+
+
+# ---------- C8: HS code (any two documents that carry it) ----------
+def _hs_codes(doc_key, doc):
+    """[(printed, digits)] for every plausible HS code on the document (at least four digits)."""
+    if doc_key == "commercial_invoice":
+        raw = [(line or {}).get("hs_code") for line in (doc.get("lines") or [])]
+    else:
+        raw = doc.get("hs_codes") or []
+    out, seen = [], set()
+    for r in raw:
+        if r is None:
+            continue
+        digits = re.sub(r"\D", "", str(r))
+        if len(digits) >= 4 and digits not in seen:
+            seen.add(digits)
+            out.append((str(r).strip(), digits))
+    return out
+
+
+def check_c8(documents, rules):
+    """Compare HS codes on every pair of documents that carry them: digits only, the first hs_code_digits
+    digits (6 in the rule pack). Every code on one document must appear on the other. Medium."""
+    n = int(rules.get("hs_code_digits", 6))
+    present = []
+    for key in ("commercial_invoice", "packing_list", "bill_of_lading"):
+        codes = _hs_codes(key, documents.get(key) or {})
+        if codes:
+            present.append((key, codes))
+    if len(present) < 2:
+        return CheckResult("C8", "skipped_not_present", note="HS codes are present on fewer than two documents.")
+
+    def same(a, b):
+        k = min(len(a), len(b), n)
+        return a[:k] == b[:k]
+
+    findings = []
+    for (doc_a, codes_a), (doc_b, codes_b) in combinations(present, 2):
+        ok = all(any(same(x[1], y[1]) for y in codes_b) for x in codes_a) and all(any(same(y[1], x[1]) for x in codes_a) for y in codes_b)
+        if ok:
+            continue
+        a, b = ", ".join(c[0] for c in codes_a), ", ".join(c[0] for c in codes_b)
+        findings.append(Finding("C8", "medium", [doc_a, doc_b], "hs_code", {doc_a: a, doc_b: b},
+                                f"HS code differs: {a} on the {DOC_LABEL[doc_a]}, {b} on the {DOC_LABEL[doc_b]}."))
+    return CheckResult("C8", "finding" if findings else "pass", findings=findings)
+
+
+# ---------- C9: description of goods (all three documents) ----------
+STOP_WORDS = {"and", "the", "for", "with", "from", "per", "are", "all", "etc"}
+
+
+def _description_tokens(text):
+    words = re.findall(r"[a-z]+", str(text).lower())
+    return {_norm_word(w) for w in words if len(w) >= 3 and w not in STOP_WORDS}
+
+
+def _description_text(key, doc):
+    if key == "description_of_goods":
+        return doc.get("description_of_goods") or ""
+    return " ".join(str((line or {}).get("description") or "") for line in (doc.get("lines") or [])).strip()
+
+
+def check_c9(documents, rules):
+    """The descriptions must share enough words, measured against the shorter description (a bill of lading
+    description is often brief). Otherwise a person should look: Low severity, wording fixed."""
+    threshold = float(rules.get("description_overlap_threshold", 0.3))
+    present = []
+    for key, getter in (("commercial_invoice", "lines"), ("packing_list", "lines"), ("bill_of_lading", "description_of_goods")):
+        text = _description_text(getter, documents.get(key) or {})
+        tokens = _description_tokens(text)
+        if tokens:
+            present.append((key, text, tokens))
+    if len(present) < 2:
+        return CheckResult("C9", "skipped_not_present", note="The description is present on fewer than two documents.")
+
+    findings = []
+    for (doc_a, text_a, tok_a), (doc_b, text_b, tok_b) in combinations(present, 2):
+        if len(tok_a & tok_b) / min(len(tok_a), len(tok_b)) >= threshold:
+            continue
+        findings.append(Finding("C9", "low", [doc_a, doc_b], "description", {doc_a: text_a[:200], doc_b: text_b[:200]},
+                                "The descriptions of goods share few words. Please check that they describe the same goods."))
+    return CheckResult("C9", "finding" if findings else "pass", findings=findings)
+
+
+# ---------- C10: declared value (invoice against bill of lading, only when the bill states one) ----------
+def check_c10(documents, rules):
+    """Total value and currency must be equal. Skipped when the bill of lading has no declared value
+    (it was missing on all our samples). Medium."""
+    inv = documents.get("commercial_invoice") or {}
+    bl = documents.get("bill_of_lading") or {}
+    a, b = _num(inv.get("total_value")), _num(bl.get("declared_value"))
+    if a is None or b is None:
+        return CheckResult("C10", "skipped_not_present", note="No declared value on the bill of lading, or no total on the invoice.")
+
+    docs = ["commercial_invoice", "bill_of_lading"]
+    cur_a, cur_b = (inv.get("currency") or "").strip().upper(), (bl.get("currency") or "").strip().upper()
+    if cur_a and cur_b and cur_a != cur_b:
+        finding = Finding("C10", "medium", docs, "currency", {docs[0]: cur_a, docs[1]: cur_b},
+                          f"Declared value currency differs: {cur_a} on the invoice, {cur_b} on the bill of lading.")
+        return CheckResult("C10", "finding", finding)
+    if abs(a - b) <= Decimal(str(rules["money_tolerance"])):
+        return CheckResult("C10", "pass")
+    cur = cur_a or cur_b
+    unit = f" {cur}" if cur else ""
+    finding = Finding("C10", "medium", docs, "declared_value", {docs[0]: _json_num(a), docs[1]: _json_num(b)},
+                      f"Declared value differs: {_fmt(a)}{unit} on the invoice, {_fmt(b)}{unit} on the bill of lading.")
+    return CheckResult("C10", "finding", finding)
+
+
 # ---------- runner ----------
-CHECKS = [check_c1, check_c2, check_c3, check_c4, check_c5, check_c6]   # add C7 to C10 here as they are written
+CHECKS = [check_c1, check_c2, check_c3, check_c4, check_c5, check_c6, check_c7, check_c8, check_c9, check_c10]
 
 
 def run_checks(documents, rules):
