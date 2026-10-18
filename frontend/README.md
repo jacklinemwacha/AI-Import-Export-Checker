@@ -1,24 +1,17 @@
-# Kindred Spirits
+# AI Import-Export Checker (Frontend)
 
-https://claude.ai/share/4329c308-a9fb-49ee-8c1a-6a4fbabbae09
+This is the frontend interface for the **AI Import-Export Checker** built for the hackathon. It communicates with our backend validation and database engine to help verify import and export compliance.
 
-This project was built with [Lovable](https://lovable.dev).
+## Tech Stack
+- React / Vite / TypeScript
+- Tailwind CSS / Shadcn UI (Lovable generated)
 
-## Build with Lovable
+## Local Development
 
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/b6a500cb-33df-5232-a28b-55a925b0d9b9).
+If you prefer working locally:
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
-
-## Development
-
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
-
-```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
+```bash
+git clone <repository-url>
+cd AI-Import-Export-Checker/frontend
+npm install
 npm run dev
-```
